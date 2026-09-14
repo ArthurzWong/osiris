@@ -83,6 +83,13 @@ Osiris is a production-grade OSINT platform that provides situational awareness 
 - **Progressive loading** — data fetched on-demand when layers are activated
 - **Viewport-aware** — only loads relevant data for the visible region
 
+### Texas CCTV
+Public TxDOT ITS snapshots are integrated with the existing camera markers, preview grid and viewer. Use `/api/cctv?region=texas` for Texas only; global and Texas location queries include the same source. District inventories are cached independently, with stale data retained during outages. Availability varies by district and camera; these are refreshing JPEG snapshots, not video streams.
+
+Source: [TxDOT ITS](https://its.txdot.gov/its/District/DAL/cameras).
+
+Run `npm test` for offline checks or `RUN_LIVE_TESTS=1 npx vitest run src/app/api/cctv/texas.test.ts` to check the public Texas inventory.
+
 ### RECON Toolkit
 - **Port Scanner** — TCP connect scan with service fingerprinting
 - **DNS Lookup** — Full record resolution (A, AAAA, MX, NS, TXT, CNAME)

@@ -40,6 +40,7 @@ import { fetchFloridaCameras } from './florida';
 import { fetchGeorgiaCameras } from './georgia';
 import { fetchNorthCarolinaCameras } from './northcarolina';
 import { fetchArizonaCameras } from './arizona';
+import { fetchTexasCameras } from './texas';
 import { fetchEastAsiaCameras, fetchSeAsiaCameras, fetchWestAsiaCameras } from './opencctv';
 import {
   fetchLatamLiveCameras,
@@ -512,6 +513,7 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'georgia': fetchGeorgiaCameras,
   'northcarolina': fetchNorthCarolinaCameras,
   'arizona': fetchArizonaCameras,
+  'texas': fetchTexasCameras,
   'eastasia': fetchEastAsiaCameras,
   'seasia': fetchSeAsiaCameras,
   'westasia': fetchWestAsiaCameras,
@@ -776,6 +778,8 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 41.9 && lat < 46.3 && lng > -124.6 && lng < -116.4) regions.push('oregon');
   // Nevada (NDOT) — explicit, since us-west only covers WA + CA
   if (lat > 34.9 && lat < 42.1 && lng > -120.1 && lng < -113.9) regions.push('nevada');
+  // Texas (TxDOT), including El Paso west of the central region.
+  if (lat > 25.8 && lat < 36.6 && lng > -106.7 && lng < -93.4) regions.push('texas');
   // US-Central
   if (lat > 24 && lat < 49 && lng > -105 && lng < -80) regions.push('us-central');
   // Michigan (MDOT) — explicit, since us-central only covers Illinois
