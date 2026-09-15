@@ -329,10 +329,15 @@ export function toggleSound() {
 
 // ── Autostart ──────────────────────────────────────────────────────────────
 
+/**
+ * Only the events a browser actually counts as user activation. Scroll, wheel,
+ * pointermove and focus are not — and listening for them actively hurt: a
+ * mousemove arrives just before mousedown on every click, so a throttled attempt
+ * on the mousemove silently discarded the click that would have unlocked audio.
+ */
 const GESTURES = [
-  'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
-  'keydown', 'keyup', 'touchstart', 'touchend', 'touchmove', 'pointermove',
-  'mousemove', 'scroll', 'wheel', 'focus', 'visibilitychange',
+  'pointerdown', 'mousedown', 'pointerup', 'mouseup',
+  'click', 'dblclick', 'keydown', 'keyup', 'touchstart', 'touchend',
 ];
 let armed = false;
 
@@ -380,20 +385,20 @@ export function armAutostart() {
 
   const detach = () => GESTURES.forEach((t) => window.removeEventListener(t, kick, true));
 
-  // Listeners stay attached until sound is genuinely audible: not every event is
-  // a user activation in every browser (a scroll is not, in Chrome), and a
-  // single missed one would otherwise leave the page silent forever. Throttled
-  // so pointermove cannot turn into a hot loop of rejected play() calls.
-  let lastAttempt = 0;
+  // One attempt at a time. Deliberately NOT a time window: a click fires
+  // pointerdown, mousedown and click within a few milliseconds, and a window
+  // wide enough to dedupe those is also wide enough to swallow a real second
+  // attempt. This only prevents overlapping play() calls.
+  let inFlight = false;
   function kick() {
     if (state.playing) {
       detach();
       return;
     }
-    const now = Date.now();
-    if (now - lastAttempt < 700) return;
-    lastAttempt = now;
+    if (inFlight) return;
+    inFlight = true;
     void startAudible().then((ok) => {
+      inFlight = false;
       if (ok) detach();
     });
   }
