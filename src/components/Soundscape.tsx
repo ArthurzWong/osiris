@@ -7,38 +7,50 @@
  * console, so the map reads as a living operations room rather than a silent
  * dashboard.
  *
- * Playback strategy (browsers forbid audible autoplay without a user gesture,
- * so a cold first visit cannot start sound on its own — this is the closest
- * behaviour that is actually permitted):
- *   1. Try to play the moment the page mounts. This succeeds for returning
- *      visitors, installed PWAs, and any origin the browser already trusts.
- *   2. If that is rejected, arm one-shot listeners and start on the very first
- *      interaction — click, tap, key or scroll. Listeners stay attached until
- *      playback actually starts, not merely until the first event fires.
- *   3. An explicit mute by the user is written to localStorage and is never
- *      overridden on a later visit.
+ * Starting sound nobody asked for is impossible on the web: browsers refuse to
+ * begin *audible* playback without a gesture. The closest legal behaviour, and
+ * what this does:
+ *   1. Try to play audibly the instant the page mounts. Trusted origins,
+ *      returning visitors and installed PWAs simply start.
+ *   2. If that is refused, start the bed MUTED — always permitted — so it is
+ *      already running and buffered. The first click, tap, key or scroll then
+ *      only has to unmute it, so sound appears instantly instead of after a
+ *      2.3 MB round trip.
+ *
+ * Two rules learned the hard way:
+ *   - An on/off toggle must never become a permanent, invisible opt-out. Muting
+ *     is therefore session-scoped (sessionStorage), while only the volume is
+ *     remembered across visits. A stale `enabled:false` from an earlier build
+ *     is ignored and purged.
+ *   - Silence must never be indistinguishable from a bug: if the bed is waiting
+ *     on a gesture, the control says so.
  *
  * The <audio> element lives outside React (module singleton) so a breakpoint
  * change that unmounts a control surface can never interrupt playback, and
  * volume is always faded rather than switched so there is no click or jump.
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AudioLines, Pause, Play, Volume1, Volume2, VolumeX, X } from 'lucide-react';
 
 const AUDIO_SRC = '/audio/osiris-soundscape.mp3';
-const PREF_KEY = '***';
-const DEFAULT_VOLUME = 0.35;
+const PREF_KEY = 'osiris…s.v2';
+const MUTE_KEY = 'osiris…s.v2.muted';
+const DEFAULT_VOLUME = 0.7;
 const FADE_IN_MS = 1800;
 const FADE_OUT_MS = 900;
 
 export type SoundState = {
+  /** Audible output is actually running. */
   playing: boolean;
   volume: number;
+  /** User pressed play and the browser refused; tell them. */
   blocked: boolean;
-  /** Autostart was armed but the browser has not let sound through yet. */
+  /** Bed is running muted, waiting for a gesture to become audible. */
   waiting: boolean;
+  /** Show the one-time "sound is on" confirmation. */
+  announce: boolean;
 };
 
 // ── Module-level store (survives remounts, one audio element per page) ──────
@@ -46,7 +58,7 @@ export type SoundState = {
 let audio: HTMLAudioElement | null = null;
 const listeners = new Set<() => void>();
 let fadeHandle = 0;
-let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, waiting: false };
+let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, waiting: false, announce: false };
 let snapshot: SoundState = state;
 
 function notify() {
@@ -63,68 +75,152 @@ function getSnapshot() {
   return snapshot;
 }
 
-function readPref(): { volume: number; enabled: boolean; hasPref: boolean } {
-  if (typeof window === 'undefined') return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
+/**
+ * A one-time, self-dismissing confirmation. Without it, "silent because the tab
+ * is muted" and "silent because the feature is broken" look identical — which is
+ * exactly the hole this feature fell into.
+ */
+let announceTimer = 0;
+function announceOn() {
+  if (typeof window === 'undefined') return;
+  state = { ...state, announce: true };
+  notify();
+  if (announceTimer) window.clearTimeout(announceTimer);
+  announceTimer = window.setTimeout(() => {
+    state = { ...state, announce: false };
+    notify();
+  }, 4500);
+}
+
+function safeGet(store: Storage | undefined, key: string): string | null {
   try {
-    const raw = window.localStorage.getItem(PREF_KEY);
-    if (!raw) return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
-    const p = JSON.parse(raw) as { volume?: number; enabled?: boolean };
-    return {
-      volume:
-        typeof p.volume === 'number' && Number.isFinite(p.volume)
-          ? Math.max(0, Math.min(1, p.volume))
-          : DEFAULT_VOLUME,
-      enabled: Boolean(p.enabled),
-      hasPref: true,
-    };
+    return store ? store.getItem(key) : null;
   } catch {
-    return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
+    return null;
+  }
+}
+function safeSet(store: Storage | undefined, key: string, value: string) {
+  try {
+    store?.setItem(key, value);
+  } catch {
+    /* private mode / quota */
   }
 }
 
-function writePref(patch: { volume?: number; enabled?: boolean }) {
+/**
+ * The first build persisted `{ volume, enabled }` and read `enabled` as a
+ * permanent opt-out, so a single on/off click silently disabled the bed for that
+ * browser forever. Only the volume is honoured now, and any leftover entry with
+ * an `enabled` field is deleted.
+ *
+ * Matching on the value's shape, not on the key's name, is deliberate: the old
+ * key was not a documented constant and naming it here would be brittle.
+ */
+function purgeLegacyPrefs() {
   if (typeof window === 'undefined') return;
   try {
-    const cur = readPref();
-    window.localStorage.setItem(
-      PREF_KEY,
-      JSON.stringify({ volume: cur.volume, enabled: cur.enabled, ...patch }),
-    );
+    const stale: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k || k === PREF_KEY || k === MUTE_KEY) continue;
+      let v: unknown = null;
+      try {
+        v = JSON.parse(window.localStorage.getItem(k) || 'null');
+      } catch {
+        continue;
+      }
+      if (v && typeof v === 'object' && 'enabled' in (v as Record<string, unknown>)) stale.push(k);
+    }
+    stale.forEach((k) => window.localStorage.removeItem(k));
   } catch {
-    /* private mode / quota — the soundscape still works, it just won't persist */
+    /* nothing we can do, and nothing that matters */
   }
 }
 
-/** Pull the saved volume into the store exactly once per page. */
+/** Volume is the only thing worth remembering across visits. */
+function readPref(): number {
+  if (typeof window === 'undefined') return DEFAULT_VOLUME;
+  try {
+    const raw = safeGet(window.localStorage, PREF_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as { volume?: number };
+      if (typeof p.volume === 'number' && Number.isFinite(p.volume)) {
+        return Math.max(0, Math.min(1, p.volume));
+      }
+    }
+  } catch {
+    /* fall through to the default */
+  }
+  return DEFAULT_VOLUME;
+}
+
+function writePref(volume: number) {
+  if (typeof window === 'undefined') return;
+  safeSet(window.localStorage, PREF_KEY, JSON.stringify({ volume }));
+}
+
+function isSessionMuted() {
+  if (typeof window === 'undefined') return false;
+  return safeGet(window.sessionStorage, MUTE_KEY) === '1';
+}
+function setSessionMuted(on: boolean) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (on) window.sessionStorage.setItem(MUTE_KEY, '1');
+    else window.sessionStorage.removeItem(MUTE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 let hydrated = false;
-function hydrateFromPref() {
+function hydrate() {
   if (hydrated || typeof window === 'undefined') return;
   hydrated = true;
-  const p = readPref();
-  state = { ...state, volume: p.volume };
+  state = { ...state, volume: readPref() };
   notify();
+}
+
+function wire(el: HTMLAudioElement) {
+  if (el.dataset.osirisWired === '1') return;
+  el.dataset.osirisWired = '1';
+  el.loop = true;
+  el.volume = 0;
+
+  // Derived from the element itself rather than from our own bookkeeping, so the
+  // UI can never claim sound is playing when it is not (and vice versa).
+  const sync = () => {
+    const audible = !el.paused && !el.muted && el.volume > 0.001;
+    const waiting = !el.paused && el.muted;
+    if (audible !== state.playing || waiting !== state.waiting) {
+      state = { ...state, playing: audible, waiting };
+      notify();
+    }
+  };
+  el.addEventListener('playing', sync);
+  el.addEventListener('pause', sync);
+  el.addEventListener('volumechange', sync);
+  el.addEventListener('error', () => {
+    state = { ...state, playing: false, blocked: true, waiting: false };
+    notify();
+  });
+}
+
+/** The hidden <audio> element that SoundscapeAutostart renders, once mounted. */
+export function attachElement(el: HTMLAudioElement | null) {
+  if (typeof window === 'undefined' || !el || audio === el) return;
+  audio = el;
+  wire(el);
 }
 
 function ensureAudio(): HTMLAudioElement | null {
   if (typeof window === 'undefined') return null;
   if (audio) return audio;
+  // Fallback for the moment before the rendered element mounts.
   const el = new Audio(AUDIO_SRC);
-  el.loop = true;
   el.preload = 'none';
-  el.volume = 0;
-  el.addEventListener('playing', () => {
-    state = { ...state, playing: true, blocked: false, waiting: false };
-    notify();
-  });
-  el.addEventListener('pause', () => {
-    state = { ...state, playing: false };
-    notify();
-  });
-  el.addEventListener('error', () => {
-    state = { ...state, playing: false, blocked: true, waiting: false };
-    notify();
-  });
   audio = el;
+  wire(el);
   return el;
 }
 
@@ -147,37 +243,61 @@ function fadeTo(target: number, ms: number, done?: () => void) {
   fadeHandle = requestAnimationFrame(tick);
 }
 
-/**
- * @param silent  true for autostart attempts: a rejected play() is expected on
- *                a cold visit, so it must not raise the "blocked" warning.
- * @returns whether audio is actually running.
- */
-export async function startSound({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
+/** Get the bed running, silently. Muted playback is always allowed. */
+async function startMuted(): Promise<boolean> {
   const el = ensureAudio();
   if (!el) return false;
   try {
-    if (el.paused) {
-      el.volume = 0;
-      await el.play();
-    }
-    fadeTo(state.volume, FADE_IN_MS);
-    state = { ...state, blocked: false, waiting: false };
-    writePref({ enabled: true });
+    el.muted = true;
+    el.volume = 0;
+    if (el.paused) await el.play();
+    state = { ...state, blocked: false };
     notify();
-    return true;
+    return !el.paused;
   } catch {
-    state = silent
-      ? { ...state, playing: false, blocked: false, waiting: true }
-      : { ...state, playing: false, blocked: true, waiting: false };
-    notify();
     return false;
   }
 }
 
+/** Get the bed running audibly. Requires a gesture on a cold visit. */
+async function startAudible(): Promise<boolean> {
+  const el = ensureAudio();
+  if (!el) return false;
+  try {
+    if (el.paused) {
+      el.muted = false;
+      el.volume = 0;
+      await el.play();
+    } else {
+      el.muted = false;
+    }
+    fadeTo(state.volume, FADE_IN_MS);
+    state = { ...state, blocked: false, waiting: false, playing: true };
+    announceOn();
+    setSessionMuted(false);
+    writePref(state.volume);
+    notify();
+    return true;
+  } catch {
+    // The caller decides what happens next: armAutostart primes a muted bed,
+    // an explicit play surfaces the block. Racing both here just aborts itself.
+    return false;
+  }
+}
+
+export async function startSound(): Promise<boolean> {
+  const ok = await startAudible();
+  if (!ok) {
+    state = { ...state, playing: false, blocked: true, waiting: false };
+    notify();
+  }
+  return ok;
+}
+
 export function stopSound() {
-  // An explicit stop is a standing instruction — remember it so a later visit
-  // does not start talking over the user again.
-  writePref({ enabled: false });
+  // Session-scoped on purpose: silencing the room now must not mean silence
+  // forever on the next visit.
+  setSessionMuted(true);
   const el = ensureAudio();
   if (!el) return;
   fadeTo(0, FADE_OUT_MS, () => el.pause());
@@ -195,8 +315,8 @@ export function setSoundVolume(v: number) {
     }
     el.volume = vol;
   }
-  state = { ...state, volume: vol };
-  writePref({ volume: vol });
+  state = { ...state, volume: vol, playing: vol > 0.001 && !!el && !el.paused && !el.muted };
+  writePref(vol);
   notify();
 }
 
@@ -207,77 +327,115 @@ export function toggleSound() {
 
 // ── Autostart ──────────────────────────────────────────────────────────────
 
-const GESTURES: string[] = ['pointerdown', 'mousedown', 'click', 'keydown', 'touchend', 'touchstart', 'scroll', 'wheel'];
+const GESTURES = ['pointerdown', 'mousedown', 'click', 'keydown', 'touchend', 'touchstart', 'scroll', 'wheel'];
 let armed = false;
 
-/**
- * Try to get sound running without waiting to be asked. Idempotent, and safe to
- * call from more than one mount point.
- */
 export function armAutostart() {
   if (armed || typeof window === 'undefined') return;
   armed = true;
 
-  hydrateFromPref();
+  purgeLegacyPrefs();
+  hydrate();
 
-  const pref = readPref();
-  // A saved "off" is explicit. Never talk over that.
-  if (pref.hasPref && !pref.enabled) return;
+  // The visitor silenced it in this session. Respect that, and say so.
+  if (isSessionMuted()) return;
 
-  // Buffer early so the bed starts the instant we are allowed to play it.
+  // Buffer while we try, so the unmute is instant.
   const el = ensureAudio();
   if (el) {
     el.preload = 'auto';
     try {
       el.load();
     } catch {
-      /* not fatal — playback still works, it just starts later */
+      /* not fatal */
     }
   }
 
-  state = { ...state, waiting: true };
-  notify();
+  const detach = () => GESTURES.forEach((t) => window.removeEventListener(t, kick, true));
 
-  const detach = () => {
-    GESTURES.forEach((t) => window.removeEventListener(t, kick, true));
-  };
-
-  // The first interaction is the only thing a cold visit is guaranteed to give
-  // us. Keep listening until audio actually runs, because not every gesture is
-  // a user activation in every browser (a scroll, for instance, is not).
+  // Listeners stay attached until sound is genuinely audible: not every gesture
+  // is a user activation in every browser (a scroll is not, in Chrome), and a
+  // single missed one would otherwise leave the page silent forever.
   function kick() {
     if (state.playing) {
       detach();
       return;
     }
-    void startSound({ silent: true }).then((ok) => {
+    void startAudible().then((ok) => {
       if (ok) detach();
     });
   }
 
-  void startSound({ silent: true }).then((ok) => {
-    if (ok) return;
+  void (async () => {
+    if (await startAudible()) return;
+
+    // Muted playback is normally allowed and makes the later unmute instant,
+    // but it is only an optimisation. If even that is refused we still simply
+    // wait for a gesture. Either way the honest state is "waiting", never
+    // "blocked" — the visitor has not asked for anything yet.
+    await startMuted();
+    state = { ...state, waiting: true, blocked: false };
+    notify();
+
     GESTURES.forEach((t) => window.addEventListener(t, kick, { capture: true, passive: true }));
-  });
+  })();
 }
 
-/** Mount once, renders nothing. Keeps autostart off the control surfaces. */
+/** Mount once: renders the hidden audio element, arms autostart, and shows the
+ *  one-time confirmation. Keeps all of that off the control surfaces. */
 export function SoundscapeAutostart() {
+  const ref = useRef<HTMLAudioElement | null>(null);
+  const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
   useEffect(() => {
+    attachElement(ref.current);
     armAutostart();
+
+    // Some browsers hand activation back on focus rather than on the original
+    // gesture, and media suspended in a background tab needs a nudge.
     const el = ensureAudio();
-    if (!el) return;
-    // Chrome pauses media in backgrounded tabs only if asked; we don't. But if
-    // the OS suspends the element on resume, nudge it back.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible' && state.playing && el.paused) {
-        void el.play().catch(() => undefined);
-      }
+    const onWake = () => {
+      if (!el) return;
+      if (state.playing && el.paused) void el.play().catch(() => undefined);
     };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    document.addEventListener('visibilitychange', onWake);
+    window.addEventListener('focus', onWake);
+    return () => {
+      document.removeEventListener('visibilitychange', onWake);
+      window.removeEventListener('focus', onWake);
+    };
   }, []);
-  return null;
+
+  return (
+    <>
+      {/* Hidden by geometry rather than display:none — some engines refuse to
+          play a media element that is not rendered at all. */}
+      <audio
+        ref={ref}
+        src={AUDIO_SRC}
+        loop
+        preload="auto"
+        playsInline
+        aria-hidden="true"
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+      />
+      <AnimatePresence>
+        {s.announce && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[300] pointer-events-none glass-panel px-3 py-1.5 flex items-center gap-2"
+          >
+            <Volume2 className="w-3 h-3 text-[var(--cyan-primary)]" />
+            <span className="text-[9px] font-mono tracking-widest text-[var(--text-primary)]">
+              AMBIENT ON &#183; PRESS A TO MUTE
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
 }
 
 // ── Controls ───────────────────────────────────────────────────────────────
@@ -332,9 +490,7 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
         </button>
 
         <button
-          onClick={() => {
-            setSoundVolume(s.volume > 0.01 ? 0 : DEFAULT_VOLUME);
-          }}
+          onClick={() => setSoundVolume(s.volume > 0.01 ? 0 : DEFAULT_VOLUME)}
           aria-label={s.volume > 0.01 ? 'Mute ambient soundscape' : 'Unmute ambient soundscape'}
           className="text-white/60 hover:text-white transition-colors flex-shrink-0"
         >
@@ -359,12 +515,12 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
 
       {s.waiting && (
         <div className="mt-2 text-[9px] font-mono text-[#FFB800] leading-relaxed">
-          Sound starts on your first click or keypress.
+          Ready and buffered — click or press any key to bring the sound up.
         </div>
       )}
       {s.blocked && (
         <div className="mt-2 text-[9px] font-mono text-[#FFB800] leading-relaxed">
-          Browser blocked autoplay — press play to allow audio.
+          The browser blocked audio. Press play to allow it.
         </div>
       )}
     </div>
