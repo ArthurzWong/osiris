@@ -2392,6 +2392,44 @@ input[type="range"]::-moz-range-thumb {
   border: 2px solid rgba(0,0,0,0.3);
 }
 
+/* ── Ambient soundscape mixer slider (cyan, thinner than the remote's) ── */
+.osiris-audio-range {
+  height: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+.osiris-audio-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.osiris-audio-range::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  background: var(--cyan-primary);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.45);
+}
+.osiris-audio-range::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 14px rgba(0, 229, 255, 0.65);
+}
+.osiris-audio-range::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.osiris-audio-range::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--cyan-primary);
+}
+.osiris-audio-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: var(--cyan-primary);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.45);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    INSTRUMENT PANEL
    Shared chrome for the tool panels — route planner, markets, and

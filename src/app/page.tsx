@@ -25,6 +25,7 @@ import GlobalStatusBar from '@/components/GlobalStatusBar';
 import LiveAlerts from '@/components/LiveAlerts';
 import WorldRemote from '@/components/WorldRemote';
 import ArcGISPanel from '@/components/ArcGISPanel';
+import { SoundscapeRailControl, SoundscapeInlineControl, toggleSound } from '@/components/Soundscape';
 const OsirisMap = dynamic(() => import('@/components/OsirisMap'), { ssr: false });
 const LayerPanel = dynamic(() => import('@/components/LayerPanel'));
 const SpaceCam = dynamic(() => import('@/components/SpaceCam'), { ssr: false });
@@ -431,6 +432,9 @@ export default function Dashboard() {
       if (e.key === 'm') setShowMarkets(p => !p);
       if (e.key === 'c') setShowScmPanel(p => !p);
       if (e.key === 'i') setShowIntel(p => !p);
+      // Ambient soundscape — the only keyboard action that makes noise, so it
+      // is deliberately a plain letter with no modifier.
+      if (e.key === 'a') toggleSound();
       if (e.key === 's') { setShowDesktopSearch(p => !p); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); }
       if (e.key === 'r' && !e.ctrlKey && !e.metaKey) setFlyToLocation({ lat: 20, lng: 0, zoom: 2.5, ts: Date.now() });
       if (e.key === 'g') {
@@ -1352,6 +1356,10 @@ export default function Dashboard() {
               <div className="w-1 h-1 rounded-full bg-[var(--gold-primary)] animate-osiris-pulse" />
               <span className="text-[var(--gold-primary)] font-bold">SUPPORT</span>
             </a>
+            {/* Last in the row on purpose: the mixer opens right-anchored, so
+                sitting at the row's right edge keeps 240px of panel on-screen
+                even on a 320px phone. */}
+            <SoundscapeInlineControl />
           </div>
           {/* A third pill on this row pushes $OSIRIS under the wordmark on a
               375px phone, so the shop link takes a line of its own. */}
@@ -1569,6 +1577,12 @@ export default function Dashboard() {
           </AnimatePresence>
         </div>
 
+
+        {/* Separator */}
+        <div className="w-4 h-px bg-white/10 mx-auto" />
+
+        {/* ── AMBIENT SOUNDSCAPE ── */}
+        <SoundscapeRailControl />
 
       </div>}
 

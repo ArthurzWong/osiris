@@ -10,6 +10,7 @@ const SHORTCUTS = [
   { key: 'L', desc: 'Toggle layer panel' },
   { key: 'M', desc: 'Toggle markets panel' },
   { key: 'I', desc: 'Toggle intel feed' },
+  { key: 'A', desc: 'Toggle ambient soundscape' },
   { key: 'R', desc: 'Reset to global view' },
   { key: '?', desc: 'Show this help' },
   { key: 'ESC', desc: 'Close panels / popups' },
