@@ -59,3 +59,4 @@ scanner_backend_backup.js
 
 # Saved camera catalogue
 /.cache/
+.env*

@@ -3,16 +3,24 @@
 /**
  * OSIRIS — Ambient Soundscape
  *
- * Plays a single, seamlessly-looping background bed under the whole console so
- * the map reads as a living operations room rather than a silent dashboard.
+ * A single, seamlessly-looping background bed that runs under the whole
+ * console, so the map reads as a living operations room rather than a silent
+ * dashboard.
  *
- * Design constraints that shaped this file:
- *  - Browsers refuse audible autoplay without a gesture, so nothing starts on
- *    its own. The audio is created lazily and only ever plays after a real
- *    click on one of the controls.
- *  - The <audio> element lives outside React (module singleton) so a breakpoint
- *    change that unmounts a control surface never interrupts playback.
- *  - Volume is always faded, never switched, so there is no click or jump.
+ * Playback strategy (browsers forbid audible autoplay without a user gesture,
+ * so a cold first visit cannot start sound on its own — this is the closest
+ * behaviour that is actually permitted):
+ *   1. Try to play the moment the page mounts. This succeeds for returning
+ *      visitors, installed PWAs, and any origin the browser already trusts.
+ *   2. If that is rejected, arm one-shot listeners and start on the very first
+ *      interaction — click, tap, key or scroll. Listeners stay attached until
+ *      playback actually starts, not merely until the first event fires.
+ *   3. An explicit mute by the user is written to localStorage and is never
+ *      overridden on a later visit.
+ *
+ * The <audio> element lives outside React (module singleton) so a breakpoint
+ * change that unmounts a control surface can never interrupt playback, and
+ * volume is always faded rather than switched so there is no click or jump.
  */
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
@@ -20,7 +28,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { AudioLines, Pause, Play, Volume1, Volume2, VolumeX, X } from 'lucide-react';
 
 const AUDIO_SRC = '/audio/osiris-soundscape.mp3';
-const PREF_KEY = 'osiris.ambient.v1';
+const PREF_KEY = '***';
 const DEFAULT_VOLUME = 0.35;
 const FADE_IN_MS = 1800;
 const FADE_OUT_MS = 900;
@@ -29,8 +37,8 @@ export type SoundState = {
   playing: boolean;
   volume: number;
   blocked: boolean;
-  /** Saved preference says "on" but nothing is playing — invite a resume. */
-  resumeHint: boolean;
+  /** Autostart was armed but the browser has not let sound through yet. */
+  waiting: boolean;
 };
 
 // ── Module-level store (survives remounts, one audio element per page) ──────
@@ -38,7 +46,7 @@ export type SoundState = {
 let audio: HTMLAudioElement | null = null;
 const listeners = new Set<() => void>();
 let fadeHandle = 0;
-let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, resumeHint: false };
+let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, waiting: false };
 let snapshot: SoundState = state;
 
 function notify() {
@@ -55,11 +63,11 @@ function getSnapshot() {
   return snapshot;
 }
 
-function readPref(): { volume: number; enabled: boolean } {
-  if (typeof window === 'undefined') return { volume: DEFAULT_VOLUME, enabled: false };
+function readPref(): { volume: number; enabled: boolean; hasPref: boolean } {
+  if (typeof window === 'undefined') return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
   try {
     const raw = window.localStorage.getItem(PREF_KEY);
-    if (!raw) return { volume: DEFAULT_VOLUME, enabled: false };
+    if (!raw) return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
     const p = JSON.parse(raw) as { volume?: number; enabled?: boolean };
     return {
       volume:
@@ -67,9 +75,10 @@ function readPref(): { volume: number; enabled: boolean } {
           ? Math.max(0, Math.min(1, p.volume))
           : DEFAULT_VOLUME,
       enabled: Boolean(p.enabled),
+      hasPref: true,
     };
   } catch {
-    return { volume: DEFAULT_VOLUME, enabled: false };
+    return { volume: DEFAULT_VOLUME, enabled: false, hasPref: false };
   }
 }
 
@@ -77,19 +86,22 @@ function writePref(patch: { volume?: number; enabled?: boolean }) {
   if (typeof window === 'undefined') return;
   try {
     const cur = readPref();
-    window.localStorage.setItem(PREF_KEY, JSON.stringify({ ...cur, ...patch }));
+    window.localStorage.setItem(
+      PREF_KEY,
+      JSON.stringify({ volume: cur.volume, enabled: cur.enabled, ...patch }),
+    );
   } catch {
     /* private mode / quota — the soundscape still works, it just won't persist */
   }
 }
 
-/** Pull the saved volume/preference into the store exactly once per page. */
+/** Pull the saved volume into the store exactly once per page. */
 let hydrated = false;
 function hydrateFromPref() {
   if (hydrated || typeof window === 'undefined') return;
   hydrated = true;
   const p = readPref();
-  state = { ...state, volume: p.volume, resumeHint: p.enabled && !state.playing };
+  state = { ...state, volume: p.volume };
   notify();
 }
 
@@ -101,7 +113,7 @@ function ensureAudio(): HTMLAudioElement | null {
   el.preload = 'none';
   el.volume = 0;
   el.addEventListener('playing', () => {
-    state = { ...state, playing: true, blocked: false };
+    state = { ...state, playing: true, blocked: false, waiting: false };
     notify();
   });
   el.addEventListener('pause', () => {
@@ -109,7 +121,7 @@ function ensureAudio(): HTMLAudioElement | null {
     notify();
   });
   el.addEventListener('error', () => {
-    state = { ...state, playing: false, blocked: true };
+    state = { ...state, playing: false, blocked: true, waiting: false };
     notify();
   });
   audio = el;
@@ -135,31 +147,41 @@ function fadeTo(target: number, ms: number, done?: () => void) {
   fadeHandle = requestAnimationFrame(tick);
 }
 
-export async function startSound() {
+/**
+ * @param silent  true for autostart attempts: a rejected play() is expected on
+ *                a cold visit, so it must not raise the "blocked" warning.
+ * @returns whether audio is actually running.
+ */
+export async function startSound({ silent = false }: { silent?: boolean } = {}): Promise<boolean> {
   const el = ensureAudio();
-  if (!el) return;
+  if (!el) return false;
   try {
     if (el.paused) {
       el.volume = 0;
       await el.play();
     }
     fadeTo(state.volume, FADE_IN_MS);
-    state = { ...state, blocked: false, resumeHint: false };
+    state = { ...state, blocked: false, waiting: false };
     writePref({ enabled: true });
     notify();
+    return true;
   } catch {
-    // Autoplay policy rejected it — surface that instead of silently failing.
-    state = { ...state, playing: false, blocked: true };
+    state = silent
+      ? { ...state, playing: false, blocked: false, waiting: true }
+      : { ...state, playing: false, blocked: true, waiting: false };
     notify();
+    return false;
   }
 }
 
 export function stopSound() {
-  const el = ensureAudio();
+  // An explicit stop is a standing instruction — remember it so a later visit
+  // does not start talking over the user again.
   writePref({ enabled: false });
+  const el = ensureAudio();
   if (!el) return;
   fadeTo(0, FADE_OUT_MS, () => el.pause());
-  state = { ...state, playing: false, resumeHint: false };
+  state = { ...state, playing: false, blocked: false, waiting: false };
   notify();
 }
 
@@ -183,14 +205,82 @@ export function toggleSound() {
   else void startSound();
 }
 
-/** Surface the "you had this on last visit" nudge without a setState-in-effect. */
-function useResumeHint(): boolean {
-  const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  useEffect(() => {
-    hydrateFromPref();
-  }, []);
-  return s.resumeHint;
+// ── Autostart ──────────────────────────────────────────────────────────────
+
+const GESTURES: string[] = ['pointerdown', 'mousedown', 'click', 'keydown', 'touchend', 'touchstart', 'scroll', 'wheel'];
+let armed = false;
+
+/**
+ * Try to get sound running without waiting to be asked. Idempotent, and safe to
+ * call from more than one mount point.
+ */
+export function armAutostart() {
+  if (armed || typeof window === 'undefined') return;
+  armed = true;
+
+  hydrateFromPref();
+
+  const pref = readPref();
+  // A saved "off" is explicit. Never talk over that.
+  if (pref.hasPref && !pref.enabled) return;
+
+  // Buffer early so the bed starts the instant we are allowed to play it.
+  const el = ensureAudio();
+  if (el) {
+    el.preload = 'auto';
+    try {
+      el.load();
+    } catch {
+      /* not fatal — playback still works, it just starts later */
+    }
+  }
+
+  state = { ...state, waiting: true };
+  notify();
+
+  const detach = () => {
+    GESTURES.forEach((t) => window.removeEventListener(t, kick, true));
+  };
+
+  // The first interaction is the only thing a cold visit is guaranteed to give
+  // us. Keep listening until audio actually runs, because not every gesture is
+  // a user activation in every browser (a scroll, for instance, is not).
+  function kick() {
+    if (state.playing) {
+      detach();
+      return;
+    }
+    void startSound({ silent: true }).then((ok) => {
+      if (ok) detach();
+    });
+  }
+
+  void startSound({ silent: true }).then((ok) => {
+    if (ok) return;
+    GESTURES.forEach((t) => window.addEventListener(t, kick, { capture: true, passive: true }));
+  });
 }
+
+/** Mount once, renders nothing. Keeps autostart off the control surfaces. */
+export function SoundscapeAutostart() {
+  useEffect(() => {
+    armAutostart();
+    const el = ensureAudio();
+    if (!el) return;
+    // Chrome pauses media in backgrounded tabs only if asked; we don't. But if
+    // the OS suspends the element on resume, nudge it back.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && state.playing && el.paused) {
+        void el.play().catch(() => undefined);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+  return null;
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
 
 function VolumeGlyph({ volume, playing }: { volume: number; playing: boolean }) {
   if (!playing || volume <= 0.01) return <VolumeX className="w-4 h-4" />;
@@ -198,11 +288,10 @@ function VolumeGlyph({ volume, playing }: { volume: number; playing: boolean }) 
   return <Volume2 className="w-4 h-4" />;
 }
 
-// ── Mixer panel ────────────────────────────────────────────────────────────
-
 function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
   const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const pct = Math.round(s.volume * 100);
+
   return (
     <div className={`glass-panel p-3 ${width}`}>
       <div className="flex items-center justify-between mb-2">
@@ -243,7 +332,9 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
         </button>
 
         <button
-          onClick={() => setSoundVolume(s.volume > 0.01 ? 0 : DEFAULT_VOLUME)}
+          onClick={() => {
+            setSoundVolume(s.volume > 0.01 ? 0 : DEFAULT_VOLUME);
+          }}
           aria-label={s.volume > 0.01 ? 'Mute ambient soundscape' : 'Unmute ambient soundscape'}
           className="text-white/60 hover:text-white transition-colors flex-shrink-0"
         >
@@ -266,6 +357,11 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
         </span>
       </div>
 
+      {s.waiting && (
+        <div className="mt-2 text-[9px] font-mono text-[#FFB800] leading-relaxed">
+          Sound starts on your first click or keypress.
+        </div>
+      )}
       {s.blocked && (
         <div className="mt-2 text-[9px] font-mono text-[#FFB800] leading-relaxed">
           Browser blocked autoplay — press play to allow audio.
@@ -275,11 +371,8 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
   );
 }
 
-// ── Desktop rail control ───────────────────────────────────────────────────
-
 export function SoundscapeRailControl() {
   const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const hint = useResumeHint();
   const [open, setOpen] = useState(false);
 
   const onToggle = () => {
@@ -310,7 +403,7 @@ export function SoundscapeRailControl() {
             className="absolute -right-1 top-1/2 -translate-y-1/2 h-4 w-[2px] rounded-full bg-current text-[var(--cyan-primary)]"
           />
         )}
-        {hint && (
+        {s.waiting && (
           <span
             aria-hidden="true"
             className="absolute inset-0 rounded-full ring-1 ring-[var(--cyan-primary)]/50 animate-osiris-pulse"
@@ -336,11 +429,8 @@ export function SoundscapeRailControl() {
   );
 }
 
-// ── Compact control (mobile cluster) ───────────────────────────────────────
-
 export function SoundscapeInlineControl() {
   const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const hint = useResumeHint();
   const [open, setOpen] = useState(false);
 
   const onToggle = () => {
@@ -365,7 +455,7 @@ export function SoundscapeInlineControl() {
         aria-pressed={s.playing}
       >
         <AudioLines className={`w-3.5 h-3.5 ${s.playing ? 'text-[var(--cyan-primary)]' : 'text-white/60'}`} />
-        {hint && (
+        {s.waiting && (
           <span
             aria-hidden="true"
             className="absolute inset-0 rounded-full ring-1 ring-[var(--cyan-primary)]/50 animate-osiris-pulse"

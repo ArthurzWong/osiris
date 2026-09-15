@@ -25,7 +25,7 @@ import GlobalStatusBar from '@/components/GlobalStatusBar';
 import LiveAlerts from '@/components/LiveAlerts';
 import WorldRemote from '@/components/WorldRemote';
 import ArcGISPanel from '@/components/ArcGISPanel';
-import { SoundscapeRailControl, SoundscapeInlineControl, toggleSound } from '@/components/Soundscape';
+import { SoundscapeRailControl, SoundscapeInlineControl, SoundscapeAutostart, toggleSound } from '@/components/Soundscape';
 const OsirisMap = dynamic(() => import('@/components/OsirisMap'), { ssr: false });
 const LayerPanel = dynamic(() => import('@/components/LayerPanel'));
 const SpaceCam = dynamic(() => import('@/components/SpaceCam'), { ssr: false });
@@ -1912,6 +1912,11 @@ export default function Dashboard() {
 
       {/* ── GLOBAL STATUS TICKER (bottom) ── */}
       <GlobalStatusBar />
+
+      {/* Autostarts the ambient bed; renders nothing. Mounted here rather than
+          on a control surface so it still runs when the mobile cluster is
+          hidden behind the route planner. */}
+      <SoundscapeAutostart />
 
       {/* Shortcut hint — more visible */}
       <div className="desktop-only absolute bottom-[26px] right-5 z-[200] pointer-events-none text-[9px] font-mono text-[var(--text-muted)] opacity-50 tracking-widest" title="Press ? to see all keyboard shortcuts">
