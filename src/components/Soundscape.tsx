@@ -51,6 +51,8 @@ export type SoundState = {
   waiting: boolean;
   /** Show the one-time "sound is on" confirmation. */
   announce: boolean;
+  /** navigator.getAutoplayPolicy('mediaelement') — why sound may be held back. */
+  policy: string;
 };
 
 // ── Module-level store (survives remounts, one audio element per page) ──────
@@ -58,7 +60,7 @@ export type SoundState = {
 let audio: HTMLAudioElement | null = null;
 const listeners = new Set<() => void>();
 let fadeHandle = 0;
-let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, waiting: false, announce: false };
+let state: SoundState = { playing: false, volume: DEFAULT_VOLUME, blocked: false, waiting: false, announce: false, policy: 'unknown' };
 let snapshot: SoundState = state;
 
 function notify() {
@@ -327,8 +329,23 @@ export function toggleSound() {
 
 // ── Autostart ──────────────────────────────────────────────────────────────
 
-const GESTURES = ['pointerdown', 'mousedown', 'click', 'keydown', 'touchend', 'touchstart', 'scroll', 'wheel'];
+const GESTURES = [
+  'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
+  'keydown', 'keyup', 'touchstart', 'touchend', 'touchmove', 'pointermove',
+  'mousemove', 'scroll', 'wheel', 'focus', 'visibilitychange',
+];
 let armed = false;
+
+/** Chrome exposes the exact reason sound may be held back — worth saying out loud. */
+function detectPolicy(): string {
+  try {
+    const nav = navigator as Navigator & { getAutoplayPolicy?: (t: string) => string };
+    if (typeof nav.getAutoplayPolicy === 'function') return nav.getAutoplayPolicy('mediaelement');
+  } catch {
+    /* not supported */
+  }
+  return 'unknown';
+}
 
 export function armAutostart() {
   if (armed || typeof window === 'undefined') return;
@@ -351,16 +368,31 @@ export function armAutostart() {
     }
   }
 
+  const policy = detectPolicy();
+  state = { ...state, policy };
+  notify();
+  console.info(
+    `[OSIRIS] ambient autoplay policy: ${policy}`,
+    policy === 'allowed'
+      ? '- sound should start on its own'
+      : '- browsers require one interaction before audible playback; the first click, tap, key or scroll starts it',
+  );
+
   const detach = () => GESTURES.forEach((t) => window.removeEventListener(t, kick, true));
 
-  // Listeners stay attached until sound is genuinely audible: not every gesture
-  // is a user activation in every browser (a scroll is not, in Chrome), and a
-  // single missed one would otherwise leave the page silent forever.
+  // Listeners stay attached until sound is genuinely audible: not every event is
+  // a user activation in every browser (a scroll is not, in Chrome), and a
+  // single missed one would otherwise leave the page silent forever. Throttled
+  // so pointermove cannot turn into a hot loop of rejected play() calls.
+  let lastAttempt = 0;
   function kick() {
     if (state.playing) {
       detach();
       return;
     }
+    const now = Date.now();
+    if (now - lastAttempt < 700) return;
+    lastAttempt = now;
     void startAudible().then((ok) => {
       if (ok) detach();
     });
@@ -515,7 +547,7 @@ function Mixer({ onClose, width }: { onClose: () => void; width: string }) {
 
       {s.waiting && (
         <div className="mt-2 text-[9px] font-mono text-[#FFB800] leading-relaxed">
-          Ready and buffered — click or press any key to bring the sound up.
+          Ready and buffered (autoplay policy: {s.policy}). Click or press any key to bring the sound up.
         </div>
       )}
       {s.blocked && (
